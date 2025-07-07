@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Form
 from fastapi.responses import PlainTextResponse
 from openai import OpenAI
 import os
@@ -35,7 +35,7 @@ Be clear, concise, and responsive. NEVER say dates are in the future unless it's
 """
 
 @app.post("/voice")
-async def voice_webhook(request: Request):
+async def voice_webhook():
     response = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="Polly.Amy" language="en-GB">
@@ -43,50 +43,60 @@ async def voice_webhook(request: Request):
         I just wanted to ask if you've had any kind of accident in the past six months that wasn’t your fault. 
         You may be entitled to compensation. May I ask you a couple of quick questions?
     </Say>
-    <Gather input="speech" action="/process" method="POST" timeout="5">
-        <Say voice="Polly.Amy" language="en-GB">Please say yes or no to get started.</Say>
+    <Gather input="speech" action="/process" method="POST" timeout="6">
+        <Say voice="Polly.Amy" language="en-GB">Please say yes or no to begin.</Say>
     </Gather>
-    <Say voice="Polly.Amy" language="en-GB">Sorry, I didn’t catch that. Let’s try again.</Say>
+    <Say voice="Polly.Amy" language="en-GB">Sorry, I didn’t catch that. Goodbye for now.</Say>
 </Response>"""
     return PlainTextResponse(response, media_type="text/xml")
 
 @app.post("/process")
 async def process_speech(request: Request):
     form = await request.form()
-    speech_result = form.get("SpeechResult", "")
+    speech_result = form.get("SpeechResult", "").strip()
+
     print(f"User said: {speech_result}")
 
-    # Add date handling to fix 'future' error
+    if not speech_result:
+        return PlainTextResponse("""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Amy" language="en-GB">Sorry, I didn’t catch anything. Goodbye for now.</Say>
+</Response>""", media_type="text/xml")
+
     today = datetime.today().date()
-    if "march 2025" in speech_result.lower():
-        speech_result = speech_result.lower().replace("march 2025", "March 1st, 2025")
-    # Handle general date errors
+
+    # Guardrails for future dates
     for word in speech_result.split():
         try:
             date_obj = datetime.strptime(word, "%Y-%m-%d").date()
             if date_obj > today:
-                speech_result += " — but please note, the user might have misspoken, it's likely a past date."
+                speech_result += " (note: the user may have meant a past date)"
         except:
-            pass
+            continue
 
-    # Call OpenAI GPT
-    completion = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": speech_result}
-        ]
-    )
-
-    ai_reply = completion.choices[0].message.content
-    print(f"AI response: {ai_reply}")
-
-    # Continue conversation
-    response = f"""<?xml version="1.0" encoding="UTF-8"?>
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": speech_result}
+            ]
+        )
+        ai_reply = completion.choices[0].message.content.strip()
+        print(f"AI response: {ai_reply}")
+    
+        response = f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <Response>
-    <Gather input="speech" action="/process" method="POST" timeout="6">
-        <Say voice="Polly.Amy" language="en-GB">{ai_reply}</Say>
+    <Gather input=\"speech\" action=\"/process\" method=\"POST\" timeout=\"6\">
+        <Say voice=\"Polly.Amy\" language=\"en-GB\">{ai_reply}</Say>
     </Gather>
-    <Say voice="Polly.Amy" language="en-GB">Sorry, I didn’t hear anything that time. Let’s move forward.</Say>
+    <Say voice=\"Polly.Amy\" language=\"en-GB\">Thanks for your time today. Goodbye.</Say>
 </Response>"""
-    return PlainTextResponse(response, media_type="text/xml")
+        return PlainTextResponse(response, media_type="text/xml")
+
+    except Exception as e:
+        print("Error generating AI response:", e)
+        return PlainTextResponse("""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Amy" language="en-GB">Sorry, something went wrong on my side. Goodbye.</Say>
+</Response>""", media_type="text/xml")
