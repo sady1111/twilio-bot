@@ -1,87 +1,159 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from openai import OpenAI
-import os
-from dotenv import load_dotenv
+from pydantic import BaseModel
 from datetime import datetime
+import openai
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from twilio.twiml.voice_response import VoiceResponse, Gather
 
-# Load environment variables
-load_dotenv()
 app = FastAPI()
 
-# Initialize OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Configure OpenAI
+openai.api_key = "YOUR_OPENAI_API_KEY"
 
-# Define system prompt for AI
-SYSTEM_PROMPT = """
-You are Sofia, a smart, warm, and professional virtual assistant from Legal Assist. It is currently July 2025.
+# Google Sheets setup
+scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
+creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+client = gspread.authorize(creds)
+sheet = client.open("Injury Claims").sheet1
 
-You are speaking to someone who may have been in an accident and is curious or confused about the claims process.
+# Helper function to check eligibility
+def is_eligible(accident_date_str):
+    try:
+        accident_date = datetime.strptime(accident_date_str, "%Y-%m-%d")
+        cutoff = datetime(2025, 8, 1)
+        return accident_date < cutoff
+    except:
+        return False
 
-Your job is to:
-- Answer ANY question they ask related to personal injury claims in the UK or Scotland.
-- Speak in a human, friendly, and reassuring way.
-- Explain things clearly, like no win–no fee, ATE policies, claim timelines, etc.
-- Handle confusion, anger, or doubt with calm professionalism.
-- Do not ask questions or interview them — just help, clarify, and support.
-- When the conversation feels done or winding down, say:
+# Helper to save to Google Sheets
+def save_to_google_sheet(data):
+    row = [
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        data.get("name"),
+        data.get("phone"),
+        data.get("email"),
+        data.get("accident_date"),
+        data.get("location"),
+        data.get("injury"),
+        data.get("treatment"),
+        data.get("pain"),
+        data.get("scotland"),
+        data.get("witness"),
+        data.get("previous_claim"),
+        data.get("eligible")
+    ]
+    sheet.append_row(row)
 
-  “Thank you for your time. You’ll receive a call shortly from our solicitor’s firm to take this further.”
+# In-memory storage (should use DB in real world)
+session_data = {}
 
-Never say anything legally binding. You are not a solicitor — you're a helpful assistant.
-"""
-
-
-# Twilio voice webhook
-@app.post("/voice")
-async def voice_webhook(request: Request):
-    response = """<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="Polly.Emma" language="en-GB">
-        Hello, this is Sofia from Legal Assist. I’m just calling about a possible accident or injury claim.
-        May I ask you a couple of quick questions to check if you're eligible for compensation?
-    </Say>
-    <Gather input="speech" action="/process" method="POST" timeout="6">
-        <Say voice="Polly.Emma" language="en-GB">Please say yes or no to begin.</Say>
-    </Gather>
-    <Say voice="Polly.Emma" language="en-GB">Sorry, I didn’t catch that. Goodbye.</Say>
-</Response>"""
-    return PlainTextResponse(response, media_type="text/xml")
-
-# Twilio speech response processor
-@app.post("/process")
-async def process_speech(request: Request):
+@app.post("/call")
+async def call_handler(request: Request):
     form = await request.form()
-    user_input = form.get("SpeechResult", "")
-    print(f"User said: {user_input}")
+    from_number = form.get("From")
 
-    # Handle future date confusion (since it's July 2025)
-    today = datetime(2025, 7, 7)
-    for word in user_input.split():
+    # Start new session if needed
+    if from_number not in session_data:
+        session_data[from_number] = {
+            "step": 0,
+            "data": {"phone": from_number}
+        }
+
+    user_session = session_data[from_number]
+    step = user_session["step"]
+    data = user_session["data"]
+    speech_result = form.get("SpeechResult", "").strip()
+
+    response = VoiceResponse()
+    gather = Gather(input="speech", timeout=6)
+
+    # STEP-BY-STEP SCRIPT LOGIC
+    if step == 0:
+        gather.say("Hello, this is Sofia from Legal Assist. Were you involved in an accident?")
+        user_session["step"] += 1
+
+    elif step == 1:
+        if "yes" in speech_result.lower():
+            gather.say("When did the accident happen? Please say the date like 15th June 2025.")
+        else:
+            response.say("Okay, thank you. If anything changes, feel free to call us back.")
+            return PlainTextResponse(str(response))
+        user_session["step"] += 1
+
+    elif step == 2:
         try:
-            date_obj = datetime.strptime(word, "%Y-%m-%d").date()
-            if date_obj > today.date():
-                user_input += " — Note: user might have meant a past date. Please confirm."
+            accident_date = datetime.strptime(speech_result, "%d %B %Y").strftime("%Y-%m-%d")
+            data["accident_date"] = accident_date
+            data["eligible"] = "Yes" if is_eligible(accident_date) else "No"
+            gather.say("Where did the accident happen? For example, road, work, or public place?")
+            user_session["step"] += 1
         except:
-            continue
+            gather.say("Sorry, I didn’t get the date. Please say it again like 10th May 2025.")
 
-    # Generate AI response
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_input}
-        ]
-    )
-    ai_reply = response.choices[0].message.content
-    print(f"AI response: {ai_reply}")
+    elif step == 3:
+        data["location"] = speech_result
+        gather.say("Was it your fault or someone else’s fault?")
+        user_session["step"] += 1
 
-    # Return TwiML
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Gather input="speech" action="/process" method="POST" timeout="6">
-        <Say voice="Polly.Emma" language="en-GB">{ai_reply}</Say>
-    </Gather>
-    <Say voice="Polly.Emma" language="en-GB">Sorry, didn’t hear anything. Let’s end it here for now.</Say>
-</Response>"""
-    return PlainTextResponse(xml, media_type="text/xml")
+    elif step == 4:
+        data["fault"] = speech_result
+        gather.say("Did anyone witness the accident?")
+        user_session["step"] += 1
+
+    elif step == 5:
+        data["witness"] = speech_result
+        gather.say("Did you report the accident to the authorities?")
+        user_session["step"] += 1
+
+    elif step == 6:
+        data["reported"] = speech_result
+        gather.say("Did you receive any medical treatment? If yes, where?")
+        user_session["step"] += 1
+
+    elif step == 7:
+        data["treatment"] = speech_result
+        gather.say("What kind of injury did you suffer?")
+        user_session["step"] += 1
+
+    elif step == 8:
+        data["injury"] = speech_result
+        gather.say("Are you still experiencing pain or symptoms?")
+        user_session["step"] += 1
+
+    elif step == 9:
+        data["pain"] = speech_result
+        gather.say("Have you made a claim before for this accident?")
+        user_session["step"] += 1
+
+    elif step == 10:
+        data["previous_claim"] = speech_result
+        gather.say("Are you located in Scotland?")
+        user_session["step"] += 1
+
+    elif step == 11:
+        data["scotland"] = speech_result
+        gather.say("Can I take your full name?")
+        user_session["step"] += 1
+
+    elif step == 12:
+        data["name"] = speech_result
+        gather.say("Can I also take your email address? You can say skip if you prefer not to.")
+        user_session["step"] += 1
+
+    elif step == 13:
+        if "skip" not in speech_result.lower():
+            data["email"] = speech_result
+        else:
+            data["email"] = ""
+
+        # Save to Google Sheets
+        save_to_google_sheet(data)
+
+        response.say("Thank you. Based on what you’ve told me, your claim appears to be potentially valid. Our solicitor team will contact you shortly. Goodbye.")
+        session_data.pop(from_number, None)
+        return PlainTextResponse(str(response))
+
+    response.append(gather)
+    return PlainTextResponse(str(response))
