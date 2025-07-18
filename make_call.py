@@ -1,19 +1,18 @@
 from twilio.rest import Client
-from dotenv import load_dotenv
-import os
 
-load_dotenv()
-
-account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-twilio_number = os.getenv("TWILIO_NUMBER")
+# 🔐 Enter your real Twilio credentials here
+account_sid = "AC312ed40bc95fecde9f15a8083cc2e257"      # Your Twilio Account SID
+auth_token = "9335908ae7c48aaaf35c8621db15362b"                 # Your Twilio Auth Token
 
 client = Client(account_sid, auth_token)
 
-call = client.calls.create(
-    to="+441612437480",  # Replace with the recipient number
-    from_=twilio_number,
-    url="https://twilio-voice-bot-6vst.onrender.com/voice"  # Replace with your bot's public URL
-)
+def make_call(phone_number):
+    call = client.calls.create(
+        url="https://your-vercel-app-name.vercel.app/call",  # Replace with your deployed endpoint
+        to=phone_number,
+        from_="+44xxxxxxxxxx"  # Your Twilio UK phone number (must be a verified number)
+    )
+    print(f"📞 Call initiated to {phone_number}. Call SID: {call.sid}")
 
-print(f"📞 Call placed! SID: {call.sid}")
+# 🔁 Test call
+make_call("+447123456789")  # <-- Change to the client's number
